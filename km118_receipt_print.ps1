@@ -96,10 +96,12 @@ public class Km118ReceiptRuntimeV4 {
   static bool longPageMode;
   static List<float> pageBudgets;
 
-  // East Asian and fullwidth chars occupy double the width of ASCII.
-  // Ranges: CJK Unified, CJK Ext A/B, Hiragana, Katakana, CJK punct,
-  // Fullwidth forms, CJK Compatibility, CJK Radicals, Kangxi, etc.
-  static int CharWidth(char c) {
+  // Width model: ASCII = 1.0 unit, CJK = 1.9 units.
+  // The 1.9 ratio comes from measured GDI+ rendering: at 5pt LXGW WenKai
+  // Mono, CN char = 7.09px, EN char = 3.66px, ratio 1.94; at 4pt ratio
+  // is also 1.94; at 6pt/9pt it is 1.88.  Using 1.9 for all sizes is within
+  // 3 percent and avoids per-font-width complexity.
+  static double CharWidth(char c) {
     int u = (int)c;
     if (u >= 0x1100 && (
         u <= 0x115F ||                              // Hangul Jamo
@@ -116,17 +118,24 @@ public class Km118ReceiptRuntimeV4 {
         (u >= 0x20000 && u <= 0x2FFFD) ||           // CJK Ext B-F
         (u >= 0x30000 && u <= 0x3FFFD)              // CJK Ext G+
        ))
-      return 2;
-    return 1;
+      return 1.88;
+    // Also include General Punctuation wide chars used in CJK text:
+    // U+2014 EM DASH, U+2026 HORIZONTAL ELLIPSIS, U+2018/2019/201C/201D
+    // smart quotes.  These render full-width in CJK fonts.
+    if (u == 0x2014 || u == 0x2026 ||
+        u == 0x2018 || u == 0x2019 ||
+        u == 0x201C || u == 0x201D)
+      return 1.88;
+    return 1.0;
   }
-  static int VWidth(string s) { int n = 0; foreach (char c in s) n += CharWidth(c); return n; }
+  static double VWidth(string s) { double n = 0; foreach (char c in s) n += CharWidth(c); return n; }
 
   static string Fit(string s, int width) {
     if (s == null) return "";
     StringBuilder sb = new StringBuilder();
-    int n = 0;
+    double n = 0;
     foreach (char c in s) {
-      int w = CharWidth(c);
+      double w = CharWidth(c);
       if (n + w > width) break;
       sb.Append(c); n += w;
     }
@@ -135,8 +144,8 @@ public class Km118ReceiptRuntimeV4 {
 
   static string PadRightV(string s, int width) {
     s = Fit(s ?? "", width);
-    int n = VWidth(s);
-    if (n < width) return s + new string(' ', width - n);
+    double n = VWidth(s);
+    if (n < width) return s + new string(' ', width - (int)Math.Round(n));
     return s;
   }
 
@@ -152,14 +161,39 @@ public class Km118ReceiptRuntimeV4 {
     return Char.IsLetterOrDigit(c) || c == '_' || c == '-' || c == '.';
   }
 
+  // CJK closing punctuation that must NOT appear at line start.
+  static bool IsCJKClosingPunct(char c) {
+    int u = (int)c;
+    return u == 0x3001 || u == 0x3002 || u == 0xFF0C ||
+           u == 0xFF1B || u == 0xFF1A || u == 0xFF1F ||
+           u == 0xFF01 || u == 0xFF09 || u == 0x300D ||
+           u == 0x300F || u == 0x3011 || u == 0x3015 ||
+           u == 0xFF5D || u == 0x300B;
+  }
+
+  static bool IsCJK(char c) {
+    int u = (int)c;
+    return (u >= 0x3400 && u <= 0x9FFF) ||   // CJK Unified + Ext A
+           (u >= 0x3040 && u <= 0x30FF) ||   // Hiragana + Katakana
+           (u >= 0xFF00 && u <= 0xFFEF) ||   // Fullwidth forms
+           (u >= 0x3000 && u <= 0x303F) ||   // CJK punctuation
+           (u >= 0xF900 && u <= 0xFAFF) ||   // CJK Compatibility
+           (u >= 0x1100 && u <= 0x11FF) ||   // Hangul Jamo
+           (u >= 0xAC00 && u <= 0xD7AF) ||   // Hangul Syllables
+           (u >= 0x20000 && u <= 0x2FFFD) || // CJK Ext B-F
+           u == 0x2014 || u == 0x2026 ||    // EM DASH, ELLIPSIS
+           u == 0x2018 || u == 0x2019 ||    // Smart single quotes
+           u == 0x201C || u == 0x201D;      // Smart double quotes
+  }
+
   static List<string> Wrap(string s, int width) {
     List<string> r = new List<string>();
     if (String.IsNullOrWhiteSpace(s)) { r.Add(""); return r; }
     string input = s.TrimEnd();
     StringBuilder line = new StringBuilder();
-    int n = 0;
+    double n = 0;
     int lastBreak = -1;
-    int lastBreakWidth = 0;
+    double lastBreakWidth = 0;
 
     Action flushAll = () => {
       string outLine = line.ToString().TrimEnd();
@@ -171,8 +205,29 @@ public class Km118ReceiptRuntimeV4 {
       char c = input[i];
       if (c == '\r') continue;
       if (c == '\n') { flushAll(); continue; }
-      int w = CharWidth(c);
+      double w = CharWidth(c);
+
+      // CJK characters can always break between any two characters with no
+      // word-boundary concept.  If the current line already has content
+      // and adding this CJK char would overflow, flush the line first, then
+      // start fresh with this character.  This lets pure-CJK lines fill the
+      // full width instead of leaving the right side empty.
       if (n + w > width && line.Length > 0) {
+        if (IsCJK(c)) {
+          // Punctuation kinsoku: CJK closing punctuation must not appear at
+          // line start.  Force it to stay on the current line even if it
+          // slightly exceeds the width limit.
+          if (IsCJKClosingPunct(c)) {
+            line.Append(c); n += w;
+            continue;
+          }
+          // Flush current line, then this CJK char starts a new line.
+          flushAll();
+          line.Append(c); n = w;
+          // CJK char itself is a valid break point for the next round.
+          lastBreak = 0; lastBreakWidth = w;
+          continue;
+        }
         if (lastBreak > 0 && lastBreak >= line.Length / 3) {
           string first = line.ToString(0, lastBreak + 1).TrimEnd();
           string rest = line.ToString(lastBreak + 1, line.Length - lastBreak - 1).TrimStart();
@@ -195,7 +250,8 @@ public class Km118ReceiptRuntimeV4 {
         lastBreak = -1; lastBreakWidth = 0;
       }
       line.Append(c); n += w;
-      if (IsGoodBreakChar(c)) { lastBreak = line.Length - 1; lastBreakWidth = n; }
+      // CJK chars and ASCII spaces/punctuation are all valid break points.
+      if (IsGoodBreakChar(c) || IsCJK(c)) { lastBreak = line.Length - 1; lastBreakWidth = n; }
     }
     if (line.Length > 0) r.Add(line.ToString().TrimEnd());
     return r;
@@ -233,15 +289,18 @@ public class Km118ReceiptRuntimeV4 {
   }
 
   static void Add(List<Segment> all, string kind, string text) {
-    // Measured char widths (avg px) at 100dpi, available width ~301px:
-    //   body(5pt)=3.66  title(9pt)=6.83  heading(6pt)=4.55  small/mono(4pt)=2.92
-    // Use 88% of theoretical max for safety margin.
-    int width = 72;                         // body: 82*0.88≈72
-    if (kind == "title") width = 38;        // title: 44*0.88≈38
-    else if (kind == "heading") width = 58; // heading: 66*0.88≈58
-    else if (kind == "mono") width = 89;    // mono: 102*0.88≈89
-    else if (kind == "small") width = 89;   // small: 102*0.88≈89
-    else if (kind == "quote") width = 72;   // quote: same as body
+    // Width = measured EN-char capacity, with small safety margin.
+    // With CharWidth(CJK)=1.937, pure CJK also fills ~100% of the line.
+    //   body(5pt):  82 EN chars, use 79   (CJK: 79/1.937 ~ 40.8 chars)
+    //   title(9pt): 44, use 42            (CJK: 42/1.937 ~ 21.7 chars)
+    //   heading(6pt): 66, use 63          (CJK: 63/1.937 ~ 32.5 chars)
+    //   small/mono(4pt): 102, use 98      (CJK: 98/1.937 ~ 50.6 chars)
+    int width = 80;
+    if (kind == "title") width = 43;
+    else if (kind == "heading") width = 64;
+    else if (kind == "mono") width = 99;
+    else if (kind == "small") width = 99;
+    else if (kind == "quote") width = 80;
     foreach (string w in Wrap(text, width)) all.Add(new Segment(kind, w));
   }
 
