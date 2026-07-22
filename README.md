@@ -34,7 +34,7 @@
 脚本路径：
 
 ```powershell
-\km118_receipt_print.ps1
+km118_receipt_print.ps1
 ```
 
 推荐命令：
