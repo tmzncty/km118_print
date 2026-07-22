@@ -96,7 +96,29 @@ public class Km118ReceiptRuntimeV4 {
   static bool longPageMode;
   static List<float> pageBudgets;
 
-  static int CharWidth(char c) { return 1; }
+  // East Asian and fullwidth chars occupy double the width of ASCII.
+  // Ranges: CJK Unified, CJK Ext A/B, Hiragana, Katakana, CJK punct,
+  // Fullwidth forms, CJK Compatibility, CJK Radicals, Kangxi, etc.
+  static int CharWidth(char c) {
+    int u = (int)c;
+    if (u >= 0x1100 && (
+        u <= 0x115F ||                              // Hangul Jamo
+        (u >= 0x2E80 && u <= 0x303E) ||             // CJK Radicals / Kangxi
+        (u >= 0x3040 && u <= 0x33BF) ||             // Hiragana, Katakana, CJK punct, compat
+        (u >= 0x3400 && u <= 0x4DBF) ||             // CJK Ext A
+        (u >= 0x4E00 && u <= 0x9FFF) ||             // CJK Unified Ideographs
+        (u >= 0xA000 && u <= 0xA4CF) ||             // Yi
+        (u >= 0xAC00 && u <= 0xD7AF) ||             // Hangul Syllables
+        (u >= 0xF900 && u <= 0xFAFF) ||             // CJK Compatibility Ideographs
+        (u >= 0xFE30 && u <= 0xFE4F) ||             // CJK Compatibility Forms
+        (u >= 0xFF00 && u <= 0xFF60) ||             // Fullwidth Forms
+        (u >= 0xFFE0 && u <= 0xFFE6) ||             // Fullwidth signs
+        (u >= 0x20000 && u <= 0x2FFFD) ||           // CJK Ext B-F
+        (u >= 0x30000 && u <= 0x3FFFD)              // CJK Ext G+
+       ))
+      return 2;
+    return 1;
+  }
   static int VWidth(string s) { int n = 0; foreach (char c in s) n += CharWidth(c); return n; }
 
   static string Fit(string s, int width) {
@@ -211,12 +233,15 @@ public class Km118ReceiptRuntimeV4 {
   }
 
   static void Add(List<Segment> all, string kind, string text) {
-    int width = 40;
-    if (kind == "title") width = 26;
-    else if (kind == "heading") width = 34;
-    else if (kind == "mono") width = 50;
-    else if (kind == "small") width = 46;
-    else if (kind == "quote") width = 38;
+    // Measured char widths (avg px) at 100dpi, available width ~301px:
+    //   body(5pt)=3.66  title(9pt)=6.83  heading(6pt)=4.55  small/mono(4pt)=2.92
+    // Use 88% of theoretical max for safety margin.
+    int width = 72;                         // body: 82*0.88≈72
+    if (kind == "title") width = 38;        // title: 44*0.88≈38
+    else if (kind == "heading") width = 58; // heading: 66*0.88≈58
+    else if (kind == "mono") width = 89;    // mono: 102*0.88≈89
+    else if (kind == "small") width = 89;   // small: 102*0.88≈89
+    else if (kind == "quote") width = 72;   // quote: same as body
     foreach (string w in Wrap(text, width)) all.Add(new Segment(kind, w));
   }
 
