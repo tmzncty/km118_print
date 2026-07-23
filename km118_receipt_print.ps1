@@ -10,6 +10,7 @@ param(
   [int]$MaxPages = 20,
   [int]$LongHeightMm = 0,
   [switch]$AutoLong,
+  [double]$FontScale = 1.12,
   [switch]$Help
 )
 
@@ -40,6 +41,10 @@ if (-not $Text -and -not $File) {
   Write-Error "Provide -Text or -File. Use -Help for usage."
   exit 1
 }
+if ($FontScale -lt 0.8 -or $FontScale -gt 2.0) {
+  Write-Error "FontScale must be between 0.8 and 2.0."
+  exit 1
+}
 
 if ($File) {
   if (-not (Test-Path -LiteralPath $File)) { Write-Error "File not found: $File"; exit 1 }
@@ -56,7 +61,7 @@ if ($AutoLong) {
     if ($t -match '^#{2,6} ') { $visual += 1.5; continue }
     $visual += [Math]::Max(1, [Math]::Ceiling($t.Length / 40.0))
   }
-  $units = $visual * 9 + 130
+  $units = $visual * (9 * $FontScale) + (130 * $FontScale)
   $estMm = [Math]::Ceiling($units / 3.937)
   if ($estMm -lt 120) { $estMm = 120 }
   $MAX_MM = 420
@@ -75,10 +80,11 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Printing;
+using System.Drawing.Text;
 using System.Text;
 using System.Text.RegularExpressions;
 
-public class Km118ReceiptRuntimeV4 {
+public class Km118ReceiptRuntimeV5 {
   class Segment {
     public string Kind;
     public string Text;
@@ -95,6 +101,26 @@ public class Km118ReceiptRuntimeV4 {
   static float pageBudget;
   static bool longPageMode;
   static List<float> pageBudgets;
+  static float fontScale = 1.0f;
+  static PrivateFontCollection fontRegularCollection;
+  static PrivateFontCollection fontMediumCollection;
+  static FontFamily fontRegularFamily;
+  static FontFamily fontMediumFamily;
+
+  static void LoadFonts() {
+    fontRegularCollection = new PrivateFontCollection();
+    fontMediumCollection = new PrivateFontCollection();
+    string regularPath = @"C:\Windows\Fonts\LXGWWenKaiMono-Regular.ttf";
+    string mediumPath = @"C:\Windows\Fonts\LXGWWenKaiMono-Medium.ttf";
+    if (!System.IO.File.Exists(regularPath) || !System.IO.File.Exists(mediumPath))
+      throw new System.IO.FileNotFoundException("LXGW WenKai Mono font files not found in C:\\Windows\\Fonts");
+    fontRegularCollection.AddFontFile(regularPath);
+    fontMediumCollection.AddFontFile(mediumPath);
+    if (fontRegularCollection.Families.Length == 0 || fontMediumCollection.Families.Length == 0)
+      throw new InvalidOperationException("Failed to load LXGW WenKai Mono private fonts");
+    fontRegularFamily = fontRegularCollection.Families[0];
+    fontMediumFamily = fontMediumCollection.Families[0];
+  }
 
   // Width model: ASCII = 1.0 unit, CJK = 1.9 units.
   // The 1.9 ratio comes from measured GDI+ rendering: at 5pt LXGW WenKai
@@ -295,12 +321,12 @@ public class Km118ReceiptRuntimeV4 {
     //   title(9pt): 44, use 42            (CJK: 42/1.937 ~ 21.7 chars)
     //   heading(6pt): 66, use 63          (CJK: 63/1.937 ~ 32.5 chars)
     //   small/mono(4pt): 102, use 98      (CJK: 98/1.937 ~ 50.6 chars)
-    int width = 80;
-    if (kind == "title") width = 43;
-    else if (kind == "heading") width = 64;
-    else if (kind == "mono") width = 99;
-    else if (kind == "small") width = 99;
-    else if (kind == "quote") width = 80;
+    int width = (int)Math.Floor(80 / fontScale);
+    if (kind == "title") width = (int)Math.Floor(43 / fontScale);
+    else if (kind == "heading") width = (int)Math.Floor(64 / fontScale);
+    else if (kind == "mono") width = (int)Math.Floor(99 / fontScale);
+    else if (kind == "small") width = (int)Math.Floor(99 / fontScale);
+    else if (kind == "quote") width = (int)Math.Floor(80 / fontScale);
     foreach (string w in Wrap(text, width)) all.Add(new Segment(kind, w));
   }
 
@@ -413,16 +439,19 @@ public class Km118ReceiptRuntimeV4 {
   }
 
   static float H(string kind) {
-    if (kind == "title") return 16;
-    if (kind == "heading") return 12;
-    if (kind == "small" || kind == "mono") return 8;
-    if (kind == "hr") return 7;
-    if (kind == "blank") return 5;
-    return 9;
+    if (kind == "title") return 16 * fontScale;
+    if (kind == "heading") return 12 * fontScale;
+    if (kind == "small" || kind == "mono") return 8 * fontScale;
+    if (kind == "hr") return 7 * fontScale;
+    if (kind == "blank") return 5 * fontScale;
+    return 9 * fontScale;
   }
 
-  public static void Print(string printerName, string paperName, string docTitle, string text, bool rotate180, bool reverse, bool box, int maxPageCount, int longHeightMm) {
+  public static void Print(string printerName, string paperName, string docTitle, string text, bool rotate180, bool reverse, bool box, int maxPageCount, int longHeightMm, double scale) {
     title = docTitle; rotate = rotate180; reversePages = reverse; drawBox = box; maxPages = maxPageCount;
+    fontScale = (float)scale;
+    LoadFonts();
+    Console.WriteLine("Font loaded: " + fontRegularFamily.Name + " / " + fontMediumFamily.Name + ", scale=" + fontScale.ToString("0.00"));
     pageBudget = longHeightMm > 0 ? (float)(longHeightMm * 3.5) : 282f;
     longPageMode = longHeightMm > 0;
     Build(text); pageIndex = 0;
@@ -460,11 +489,11 @@ public class Km118ReceiptRuntimeV4 {
       float W = e.PageBounds.Width, Hh = e.PageBounds.Height;
       if (rotate) { g.TranslateTransform(W/2f, Hh/2f); g.RotateTransform(180f); g.TranslateTransform(-W/2f, -Hh/2f); }
       using (Pen pen = new Pen(Color.Black, 1))
-      using (Font fTitle = new Font("LXGW WenKai Mono Medium", 9, FontStyle.Bold))
-      using (Font fHeading = new Font("LXGW WenKai Mono Medium", 6, FontStyle.Bold))
-      using (Font fBody = new Font("LXGW WenKai Mono", 5, FontStyle.Regular))
-      using (Font fSmall = new Font("LXGW WenKai Mono", 4, FontStyle.Regular))
-      using (Font fMono = new Font("LXGW WenKai Mono", 4, FontStyle.Regular)) {
+      using (Font fTitle = new Font(fontMediumFamily, 9 * fontScale, FontStyle.Bold, GraphicsUnit.Point))
+      using (Font fHeading = new Font(fontMediumFamily, 6 * fontScale, FontStyle.Bold, GraphicsUnit.Point))
+      using (Font fBody = new Font(fontRegularFamily, 5 * fontScale, FontStyle.Regular, GraphicsUnit.Point))
+      using (Font fSmall = new Font(fontRegularFamily, 4 * fontScale, FontStyle.Regular, GraphicsUnit.Point))
+      using (Font fMono = new Font(fontRegularFamily, 4 * fontScale, FontStyle.Regular, GraphicsUnit.Point)) {
         float x = drawBox ? 18 : 6;
         bool readingFirstPage = reversePages ? (pageIndex == pages.Count - 1) : (pageIndex == 0);
         float y = readingFirstPage ? (longHeightMm > 0 ? 60 : 76) : 10;
@@ -495,6 +524,6 @@ public class Km118ReceiptRuntimeV4 {
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition $source -ReferencedAssemblies System.Drawing.dll
-[Km118ReceiptRuntimeV4]::Print($PrinterName, $PaperName, $Title, $Text, (-not $NoRotate), ([bool]$ReversePages), ([bool]$Box), $MaxPages, $LongHeightMm)
+[Km118ReceiptRuntimeV5]::Print($PrinterName, $PaperName, $Title, $Text, (-not $NoRotate), ([bool]$ReversePages), ([bool]$Box), $MaxPages, $LongHeightMm, $FontScale)
 Start-Sleep -Seconds 2
 Get-PrintJob -PrinterName $PrinterName -ErrorAction SilentlyContinue | Select-Object ID,DocumentName,JobStatus,SubmittedTime,Size | Format-Table -AutoSize
