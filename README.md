@@ -2,369 +2,216 @@
 
 让 AI 接上快麦 / KM-118 USB 热敏卷纸打印机。
 
-本仓库记录并固化了一套在 Windows 下使用 **KM-118 热敏打印机** 打印 Markdown / 文本文档 / GitHub 二维码的方案。  
-目标是让 AI agent、脚本、自动化流程能够直接把内容打印到 80mm 热敏卷纸上，而不是每次人工调打印设置。
+本仓库固化了两套在 Windows 下使用 **KM-118 80mm 热敏卷纸打印机** 的方案，
+目标是让 AI agent、脚本、自动化流程直接把内容打到纸带上，而不是每次人工调打印设置。
+
+| 路线 | 入口 | 原理 | 适合 |
+|---|---|---|---|
+| **GDI 驱动渲染** | `km118_receipt_print.ps1` / `km118_print_qr.ps1` | 驱动把 GDI 页面渲染成 TSPL 位图帧 | 打 Markdown 文档、二维码、一次性文件 |
+| **RAW 协议直发** | `km118_tty.py` | 直接构造固件协议（TSPL + 快麦扩展）位图帧 | 流式输出、交互终端、逐行打印（电传打字机） |
+
+两条路都经 wire 级实测验证。GDI 路线是"官方正门"，RAW 路线是逆向出来的"直通道"，
+后者不依赖 GDI 渲染，任何进程都能把任意字节流变成纸带。
 
 ---
 
 ## 适用设备
 
-当前验证设备：
-
-- 打印机：KM-118
-- 连接方式：USB
-- Windows 端口：USB002
-- 驱动：KM-118 官方 / 厂商驱动
-- 纸张：80mm 热敏卷纸
-- 打印模式：Windows GDI / 驱动渲染
-
-> 注意：本方案不是 ESC/POS RAW 打印方案。  
-> KM-118 在本次测试中不接受普通 ESC/POS 文本指令，RAW 发送成功也不会实际出纸。应通过 Windows 打印驱动渲染。
+- 打印机：KM-118（快麦，USB 连接，80mm 热敏卷纸，8 dots/mm）
+- 系统：Windows（驱动已安装，打印机名 `KM-118`，端口 `USB002`）
+- 字体：[LXGW WenKai Mono](https://github.com/lxgw/LxgwWenKai)（霞鹜文楷等宽，RAW 路线硬依赖）
 
 ---
 
-## 仓库内容
+## Quick Start
+
+```powershell
+# 1. 打一份 Markdown / 文本文档 (GDI 路线)
+powershell -ExecutionPolicy Bypass -File ".\km118_receipt_print.ps1" -File doc.md -AutoLong
+
+# 2. 打二维码 (GDI 路线)
+powershell -ExecutionPolicy Bypass -File ".\km118_print_qr.ps1" -Text "https://github.com/tmzncty/km118_print"
+
+# 3. 自检样张 (RAW 路线, 先 pip install pillow)
+python km118_tty.py --selftest
+
+# 4. 把任何东西打到纸带上 (RAW 路线)
+python km118_tty.py --text "你好,纸带"
+git log --oneline | python km118_tty.py
+```
+
+---
+
+## RAW 路线：固件协议（逆向结论，wire 级实证）
+
+**KM-118 固件既不吃普通 ESC/POS 文本，也不是 ZPL——它吃的是 TSPL + 快麦扩展。**
+
+驱动 `KMPrtDrvUNI.dll` 内部嵌有 ZPL / TSPL / ESC 三套模板，按机型选择；
+对 KM-118 抓到的真实输出字节流是完整的 TSPL 帧：
+
+```text
+SIZE 80.0 mm,80.0 mm
+GAP 0.0 mm,0.0 mm
+REFERENCE 0,0
+SPEED 3
+DENSITY 8
+SET PEEL OFF
+SET CUTTER OFF
+SET PARTIAL_CUTTER OFF
+SET TEAR ON
+DIRECTION 0,0
+SHIFT 0
+OFFSET 0.0 mm
+CLS
+BITMAP 0,0,80,639,1,<51120 字节 1bpp 位图>
+PRINT 1,1
+```
+
+完整逆向过程（驱动结构、数据流、每个坑的实测记录）见
+[`docs/driver_reverse_engineering.md`](docs/driver_reverse_engineering.md)。
+
+### 帧格式要点（每一条都是踩出来的）
+
+1. **数字必须带 `.0 mm`**——`SIZE 80 mm,80 mm` 会被静默丢弃，`80.0 mm` 才认。
+2. **BITMAP 的宽是字节宽不是点宽**——80 点 @8dots/mm 写 `80`，不是 `640`。
+3. **极性：`bit=0` 出墨**——背景 `0xFF`、墨点 `0x00`，从 GDI 习惯的 1=黑要整体取反。
+4. **缺完整 `SET …` 扩展头会被静默丢弃**——固件对格式不符的帧不报错、不报错、不出纸。
+5. **帧尾必须 `PRINT 1,1`**。
+6. **整份内容必须一个 spooler job / 一条字节流**。逐行小 job 连发会被
+   spooler/USB 栈重排（17 行自检实测乱序）；单 job 字节流物理保序
+   （706KB 大 job 实测顺序完美）。
+7. **固件"正向"打印是 180° 倒置**，且驱动不替你纠正——内容要预旋 180° 再发。
+   注意是**每行位图块预旋**，不是整页旋（整页旋会把行序一起反转）。
+8. **作业结束时最后 4 行（12mm）留在热敏头与出纸口之间**——不是卡纸，是暂存区。
+   结尾必须垫 ≥4 行空白（trail）把正文拽出来；下一份打印会自动把它顶出，
+   所以 trail 留长一点（默认 6 行）无害。
+
+### 写入通道（均免提权，自动选择）
+
+- **spooler RAW**：winspool `WritePrinter`，`Datatype=RAW`。
+- **USBPRINT 直写**：`CreateFile` + `WriteFile` 到 USB 打印接口
+  （设备类 `{28d78fad-5a12-11d1-ae5b-0000f803a8c2}`），完全绕开 spooler。
+
+---
+
+## Teletype：古法电传打字机（`km118_tty.py`）
+
+敲什么，纸带上就出现什么。每行文字栅格化为 640bit × 24px 的 1bpp 条
+（3.0mm/行），攒页后整页一个 TSPL 帧、一个 job 发出。
+
+```powershell
+pip install pillow
+```
+
+| 用法 | 命令 |
+|---|---|
+| 交互模式：敲一行、回车、立即打一行 | `python km118_tty.py` |
+| 管道模式：任何命令输出整段上纸带 | `git log \| python km118_tty.py` |
+| 一次性打印 | `python km118_tty.py --text "HI"` |
+| 自检样张（13 行单 job：lead 4 + 正文 7 + trail 6） | `python km118_tty.py --selftest` |
+
+交互命令：`:q` 退出 / `:feed` 送一行空白 / `:banner` 重打横幅。
+
+参数：`--lead N`（正文前垫 N 行空白作撕纸余量，默认 4）、
+`--trail N`（正文后垫 N 行空白把内容拽出机器，默认 6，标定值 ≥4）。
+
+自动换行按**实际像素宽度**（`font.getlength`）切，中英文均按字宽计算，
+不是数字符；一条逻辑行折出的所有片段保证在同一个 job 内，不会乱序。
+
+---
+
+## 标定方法（可复用）
+
+固件打印方向、行序、卡纸深度这类"纸带上的方向问题"，**不要猜，打编号**：
+
+`calibrate.py` 发一个单 job 的 13 行标定纸带，每行标注 `ROW NN`
+（NN = 缓冲区行号）：
+
+```powershell
+python calibrate.py
+```
+
+拍一张**整条纸带 + 出纸口**的照片，一次性锁定：
+
+1. **行序方向**——沿纸带读 ROW 编号是 `00→12` 还是 `12→00`；
+2. **作业间顺序**——spooler 是 FIFO 还是 LIFO；
+3. **卡纸深度**——贴出纸口的最大 ROW 编号，比它大的行还留在机内，
+   差几行 trail 就至少给几行。
+
+本机的标定结论：行序 `00→12` 正确（buffer 第 0 行最先吐出）、作业间 FIFO、
+卡纸深度 4 行 / 12mm。教训：多轮对着旋转/垂挂的纸带照片目测方向，
+误判了至少三次；编号纸带一次锁定。
+
+---
+
+## GDI 路线：文档 / 二维码打印
+
+`km118_receipt_print.ps1`（Markdown/文本）和 `km118_print_qr.ps1`（二维码）
+走 Windows 驱动渲染。完整的稳定配置（纸型 `СƱ`、180° 旋转、`ReversePages`、
+AutoLong、420mm 长页上限）、参数说明和故障排查：
+
+→ [`docs/gdi_route.md`](docs/gdi_route.md)
+
+---
+
+## 文件布局
 
 ```text
 km118_print/
 ├── README.md
-├── km118_receipt_print.ps1   # Markdown / 文本文档打印脚本
-├── km118_print_qr.ps1        # 二维码打印脚本
-└── qr.png                    # 示例二维码
+├── km118_tty.py                    # 古法电传打字机引擎 (RAW 路线, 自包含)
+├── calibrate.py                    # 编号标定纸带 (方向/行序/卡纸深度一次锁定)
+├── km118_receipt_print.ps1         # GDI 路线: Markdown / 文本文档
+├── km118_print_qr.ps1              # GDI 路线: 二维码
+├── qr.png                          # 示例二维码
+└── docs/
+    ├── driver_reverse_engineering.md   # 驱动逆向调查报告 (完整证据链)
+    ├── gdi_route.md                      # GDI 路线详细文档
+    └── images/                           # 纸带照片 (selftest / 标定)
 ```
 
----
+## 依赖汇总
 
-## 最终稳定配置
-
-经过多轮测试，当前稳定配置如下：
-
-| 项目 | 配置 |
+| 路线 | 依赖 |
 |---|---|
-| 打印机名称 | `KM-118` |
-| USB 端口 | `USB002` |
-| 纸型 | KM-118 驱动内置小票 / 连续纸模式 `СƱ` |
-| 字体 | `LXGW WenKai Mono`，霞鹜文楷等宽 |
-| 渲染方式 | Windows GDI |
-| 页面旋转 | 180° |
-| 页序 | `ReversePages` |
-| 长页模式 | `AutoLong` |
-| 单页最大长度 | 420mm |
-| 首页切纸安全起点 | `y = 60` |
-| 普通页起点 | `y = 10` |
-| 表格处理 | 不特殊解析，按 Markdown 原文输出 |
+| GDI | Windows + KM-118 驱动 + PowerShell + LXGW WenKai Mono 字体 |
+| RAW / Teletype | Windows + KM-118 驱动 + Python 3 + Pillow + LXGW WenKai Mono 字体 |
 
----
+## 故障排查（跨路线）
 
-## 为什么需要这些设置？
+### RAW 发送成功但不出纸
 
-### 1. Windows 测试页不适合热敏小票机
+预期之外的行为。固件对格式不符的帧**静默丢弃**。逐条对照上文"帧格式要点"：
+数字带 `.0 mm`？BITMAP 宽是字节宽？有完整 `SET …` 头？尾 `PRINT 1,1`？
+位图取反了？内容预旋 180° 了？一个 job 整条发的？
 
-Windows 测试页会被当成完整页面任务，导致：
+### spooler 半死
 
-- 出纸很长；
-- 黄灯 / 红灯；
-- 打印队列 retained；
-- KM-118 状态异常。
-
-所以不要用 Windows 测试页验证小票打印。
-
----
-
-### 2. KM-118 不吃普通 ESC/POS RAW 文本
-
-测试过：
-
-```text
-ESC @
-ASCII text
-```
-
-Windows 返回发送成功，但设备不出纸。
-
-结论：
-
-> KM-118 应通过 Windows 驱动渲染，而不是 ESC/POS RAW 文本打印。
-
----
-
-### 3. 80×80 页会产生固定分页空白
-
-驱动内置 `СƱ` 纸型实际是 80mm × 80mm。  
-如果按 80×80 分页打印，页与页之间会出现固定分页空白。
-
-解决方式：
-
-> 使用自定义长页，把多页内容渲染到更长的虚拟纸上。
-
----
-
-### 4. 自定义长页最大约为 420mm
-
-测试过多个长度：
-
-| 长度 | 结果 |
-|---|---|
-| 250mm | OK |
-| 280mm | OK |
-| 300mm | OK |
-| 350mm | OK |
-| 400mm | OK |
-| 420mm | OK |
-| 440mm | 底部不可见 |
-| 500mm | 底部不可见 |
-
-最终结论：
-
-> KM-118 在当前驱动下，自定义 80mm 长页的稳定上限约为 **420mm**。
-
-因此 `AutoLong` 会以 420mm 作为单页上限，超出后自动分页。
-
----
-
-## 依赖
-
-### 必需
-
-- Windows
-- PowerShell
-- 已安装 KM-118 打印机驱动
-- 打印机名称为 `KM-118`
-
-### 推荐字体
-
-- [LXGW WenKai / 霞鹜文楷](https://github.com/lxgw/LxgwWenKai)
-- 重点使用：
-  - `LXGW WenKai Mono`
-  - `LXGW WenKai Mono Medium`
-
-如果没有该字体，Windows 可能 fallback 到其他字体，排版效果会变化。
-
-### 二维码打印依赖
-
-二维码脚本使用 Python 本地生成 QR 图片：
-
-```powershell
-pip install qrcode[pil]
-```
-
----
-
-## 文档打印脚本
-
-脚本：
-
-```text
-km118_receipt_print.ps1
-```
-
-### 推荐用法
-
-```powershell
-powershell -ExecutionPolicy Bypass -File ".\km118_receipt_print.ps1" `
-  -File "C:\path\to\document.md" `
-  -Title "文档标题" `
-  -ReversePages `
-  -AutoLong
-```
-
-### 打印一段文本
-
-```powershell
-powershell -ExecutionPolicy Bypass -File ".\km118_receipt_print.ps1" `
-  -Text "# 标题`n这是一段测试文本。" `
-  -Title "Text Test" `
-  -ReversePages `
-  -AutoLong
-```
-
----
-
-## 参数说明
-
-| 参数 | 说明 |
-|---|---|
-| `-File` | 要打印的文本 / Markdown 文件路径 |
-| `-Text` | 直接打印传入的文本 |
-| `-Title` | 打印任务标题，也会打印在文档开头 |
-| `-PrinterName` | 打印机名称，默认 `KM-118` |
-| `-PaperName` | 驱动纸型，默认 `СƱ` |
-| `-ReversePages` | 反向页序，适配当前出纸 / 阅读方向 |
-| `-AutoLong` | 自动估算长页高度，最大 420mm |
-| `-LongHeightMm` | 手动指定自定义长页高度 |
-| `-MaxPages` | 最大打印页数 |
-| `-Box` | 打印边框，默认关闭 |
-| `-NoRotate` | 禁用 180° 旋转，通常不要用 |
-
----
-
-## AutoLong 机制
-
-`AutoLong` 会根据内容估算所需高度：
-
-1. 统计文本行数；
-2. 粗略估算换行后的视觉行数；
-3. 换算为 GDI 打印高度；
-4. 自动设置 `LongHeightMm`；
-5. 单页最大限制为 420mm；
-6. 超出 420mm 自动分页。
-
-这样可以避免 80×80 固定分页产生的大量空白。
-
----
-
-## 二维码打印脚本
-
-脚本：
-
-```text
-km118_print_qr.ps1
-```
-
-### 打印 GitHub 仓库二维码
-
-```powershell
-powershell -ExecutionPolicy Bypass -File ".\km118_print_qr.ps1" `
-  -Text "https://github.com/tmzncty/km118_print" `
-  -Title "KM-118 Print Tools" `
-  -Caption "README + scripts on GitHub" `
-  -LongHeightMm 185
-```
-
-二维码会本地生成，不依赖在线 QR API。
-
----
-
-## AI Agent 调用示例
-
-如果你是 AI agent，要打印一份 Markdown 文档，可以直接调用：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.lux\km118_receipt_print.ps1" `
-  -File "C:\Users\tmzn\Downloads\README_AI_GUIDE.md" `
-  -Title "README_AI_GUIDE" `
-  -ReversePages `
-  -AutoLong
-```
-
-如果要打印当前回答，可以先写入临时文件：
-
-```powershell
-$path = "$env:TEMP\ai_output.md"
-@"
-# AI 输出
-这里是要打印的内容。
-"@ | Set-Content -Encoding UTF8 $path
-
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.lux\km118_receipt_print.ps1" `
-  -File $path `
-  -Title "AI Output" `
-  -ReversePages `
-  -AutoLong
-```
-
----
-
-## 故障排查
+频繁重启打印机后队列可能处于半死状态，重启一次 spooler / 打印机恢复。
 
 ### 打印很长、黄灯闪烁
 
-原因：
-
-- 使用了 Windows 测试页；
-- 或者使用了错误纸型；
-- 或者队列 retained。
-
-处理：
+别用 Windows 测试页验证小票机。清队列：
 
 ```powershell
 Get-PrintJob -PrinterName "KM-118" | Remove-PrintJob
 ```
 
-必要时重启打印机。
-
----
-
-### RAW / ESC-POS 没有反应
-
-这是预期行为。  
-当前设备应走 Windows 驱动渲染，不走 ESC/POS RAW。
-
----
-
-### 页尾空白略多
-
-正常。  
-为了稳定，脚本不会极限裁纸。KM-118 在自定义长页上存在驱动边界，过度压缩可能导致截断或 retained。
-
----
-
 ### 内容方向反了
 
-使用：
+- RAW 路线：内容没预旋 180°（`km118_tty.py` 已内置，勿手动再旋）。
+- GDI 路线：`-ReversePages` + 默认 180° 旋转。
 
-```powershell
--ReversePages
-```
+### 最后一行卡在机器里
 
-并保持默认 180° 旋转。
-
----
-
-### 首页切纸位置不对
-
-当前经验值：
-
-```text
-首页 y = 60
-普通页 y = 10
-```
-
-如果换机器、换驱动、换安装方向，可能需要重新校准。
-
----
-
-## 校准记录摘要
-
-本次调试确认：
-
-- KM-118 已识别为 USB 打印设备；
-- 正确端口为 USB002；
-- 正确队列为 KM-118；
-- 80mm 卷纸应使用驱动内置小票 / 连续纸模式；
-- 80×80 默认页会产生固定分页缝；
-- 自定义 80mm 长页可用；
-- 最大稳定长页约 420mm；
-- 首页切纸安全位置需要保留；
-- 最终使用 `LXGW WenKai Mono` 等宽字体实现稳定排版。
-
----
-
-## 推荐实践
-
-- 普通 Markdown 文档：使用 `-AutoLong`
-- 长文档：仍使用 `-AutoLong`，让脚本自动分页
-- 表格：保持 Markdown 原文，不做复杂图形表格
-- 图片 / QR：单独用图形脚本打印
-- 不要使用 Windows 测试页
-- 不要期待 ESC/POS RAW 文本可用
-
----
-
-## 已验证文档
-
-- `README_AI_GUIDE.md`
-- `merge-to-main-plan.md`
-- KM-118 调试记录
-- GitHub 仓库二维码
-- 420mm 纸长上限测试
-- 多页长文档
+不是卡纸，是热敏头到出纸口 12mm 暂存区。结尾加 `--trail 6`（默认已开），
+或继续打印下一份，会被自动顶出。
 
 ---
 
 ## License
 
-根据你的仓库需要自行选择，例如 MIT。
+MIT
 
 ---
 
