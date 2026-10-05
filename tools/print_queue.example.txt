@@ -1,19 +1,4 @@
-C:\Users\Administrator\.lux\km118\print_ready\PC_00.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_01.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_02.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_03.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_04.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_05.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_06.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_07.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_08.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_90.md
-C:\Users\Administrator\.lux\km118\print_ready\PC_99.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E0.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E1.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E2.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E3.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E4.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E5.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E6.md
-C:\Users\Administrator\.lux\km118\print_ready\KE_E7.md
+# 每行一个待打印 md 文件的绝对路径。队列文件复制为 print_queue.txt 后使用。
+# 示例（路径按实际环境调整，文件名建议 ASCII）：
+# C:\path	o\print_readyolume_01.md
+# C:\path	o\print_readyolume_02.md
