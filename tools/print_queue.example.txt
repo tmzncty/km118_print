@@ -1,0 +1,4 @@
+# 每行一个待打印 md 文件的绝对路径。队列文件复制为 print_queue.txt 后使用。
+# 示例（路径按实际环境调整，文件名建议 ASCII）：
+# C:\path	o\print_readyolume_01.md
+# C:\path	o\print_readyolume_02.md
